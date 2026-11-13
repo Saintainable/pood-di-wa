@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>ATSApplicationFontsPath</key>
+	<string>Fonts</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>th</string>
+	<key>CFBundleDisplayName</key>
+	<string>Pood Di Wa</string>
+	<key>CFBundleExecutable</key>
+	<string>PoodDiWa</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>app.pooddiwa.PoodDiWa</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Pood Di Wa</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Pood Di Wa — พูดดิวะ</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>พูดดิวะต้องใช้ไมโครโฟนเพื่อฟังเสียงพูดของคุณแล้วแปลงเป็นข้อความ</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>พูดดิวะใช้การรู้จำเสียงพูดของ Apple เพื่อแปลงเสียงของคุณเป็นข้อความ</string>
+</dict>
+</plist>

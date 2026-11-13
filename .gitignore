@@ -1,0 +1,7 @@
+# build output
+build/
+dist/
+*.dmg
+
+# macOS
+.DS_Store
