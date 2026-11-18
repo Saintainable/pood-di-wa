@@ -98,5 +98,4 @@ APP="/Applications/Pood Di Wa.app/Contents/MacOS/PoodDiWa"
 ## License
 
 - โค้ด: [PolyForm Noncommercial 1.0.0](LICENSE) — ใช้ฟรี แก้ไขได้ แจกต่อได้ **แต่ห้ามนำไปใช้เชิงพาณิชย์หรือขาย**
-  (เวอร์ชัน 1.0.0 ที่ปล่อยไปก่อนหน้านี้ยังอยู่ภายใต้ MIT ตามเดิม)
 - ฟอนต์ [Anuphan](https://github.com/cadsondemak/Anuphan) โดย Cadson Demak: [SIL Open Font License 1.1](Resources/Fonts/OFL.txt)
