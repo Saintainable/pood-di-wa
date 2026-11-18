@@ -5,6 +5,8 @@ import Foundation
 struct LiveResult {
     var smart: String
     var verbatim: String
+    /// สาย SMART ส่งผลสุดท้ายมาครบไหม (ไม่ครบ = ข้อความ smart ยังไม่ได้เกลา ต้องให้ AI เรียบเรียงจาก verbatim)
+    var smartComplete = true
 }
 
 /// การเชื่อมต่อ Gemini Live 1 สาย (WebSocket) — ทุกอย่างทำงานบน main thread
@@ -30,7 +32,7 @@ final class LiveSession {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    init(apiKey: String, mode: Mode, vocabulary: [String] = []) {
+    init(apiKey: String, mode: Mode, vocabulary: [String] = [], languages: [String] = []) {
         self.mode = mode
         var comps = URLComponents(string: "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent")!
         comps.queryItems = [URLQueryItem(name: "key", value: apiKey)]
@@ -38,7 +40,8 @@ final class LiveSession {
         socket = task
         task.resume()
 
-        var transcription: [String: Any] = ["languageCodes": [String](), "mode": mode.rawValue]
+        // ระบุภาษาที่ผู้ใช้พูด — ไม่ปล่อยให้เดาเอง (เดาเองบางทีออกเป็นจีน/เวียดนาม)
+        var transcription: [String: Any] = ["languageCodes": languages, "mode": mode.rawValue]
         if !vocabulary.isEmpty { transcription["customVocabulary"] = vocabulary }
         let setup: [String: Any] = [
             "setup": [
@@ -163,15 +166,17 @@ final class LiveTranscriber {
 
     /// คำศัพท์เฉพาะที่อยากให้สะกดถูก (ส่งให้ Gemini Live ตอนเริ่ม)
     var vocabulary: [String] = []
+    /// ภาษาที่ผู้ใช้พูด (รหัส BCP-47)
+    var languages: [String] = SpokenLanguage.defaults
 
     private func openSessions(apiKey: String) {
         generation += 1
         pcm = Data(); chunk = Data(); stopping = false
         // อย่าส่งคำเฉพาะให้สาย SMART: ทดสอบแล้วมันตัดข้อความครึ่งแรกทิ้ง (บั๊กฝั่ง Gemini)
-        let s = LiveSession(apiKey: apiKey, mode: .smart)
+        let s = LiveSession(apiKey: apiKey, mode: .smart, languages: languages)
         s.onPartial = { [weak self] t in self?.onPartial?(t) }
         smart = s
-        verbatim = LiveSession(apiKey: apiKey, mode: .verbatim, vocabulary: vocabulary)
+        verbatim = LiveSession(apiKey: apiKey, mode: .verbatim, vocabulary: vocabulary, languages: languages)
     }
 
     /// สำหรับทดสอบ: เชื่อมต่อโดยไม่ใช้ไมค์ แล้วป้อนเสียงเองด้วย feed()
@@ -246,13 +251,21 @@ final class LiveTranscriber {
                 guard let self, self.generation == gen else { return }
                 self.finish()
             }
+        } else if verbatim?.done == true {
+            // บางครั้งสาย SMART ไม่ส่งผลสุดท้าย (ฝั่ง Gemini) — รอแค่ 0.6 วิ แล้วไปเรียบเรียงจาก verbatim แทน
+            let gen = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, self.generation == gen else { return }
+                self.finish()
+            }
         }
     }
 
     private func finish() {
         guard let done = completion else { return }
         completion = nil
-        let result = LiveResult(smart: smart?.text ?? "", verbatim: verbatim?.text ?? "")
+        let result = LiveResult(smart: smart?.text ?? "", verbatim: verbatim?.text ?? "",
+                                smartComplete: smart?.done == true)
         let err = smart?.error
         Log.write(String(format: "live done %.1fs audio smart=%d%@ verbatim=%d%@", duration,
                          result.smart.count, smart?.done == true ? "" : "(timeout)",

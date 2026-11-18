@@ -12,21 +12,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let onboarding = OnboardingWindowController()
 
     private var statusItem: NSStatusItem!
-    private var state: State = .idle { didSet { updateStatusIcon() } }
+    private var state: State = .idle {
+        didSet {
+            updateStatusIcon()
+            // ฟังทุกการกดแป้นเฉพาะตอนกำลังอัด (จับ esc / กดคู่ปุ่มอื่น) — ตอนว่างไม่แตะคีย์บอร์ดเลย
+            hotkeys.watchKeys(state == .holding || state == .handsFree)
+            // ให้มาสคอตขยับปากตาม (มีผลเฉพาะตอนหน้าตั้งค่าเปิดอยู่)
+            let talking = state == .holding || state == .handsFree
+            if VoiceActivity.shared.listening != talking {
+                VoiceActivity.shared.listening = talking
+                if !talking { VoiceActivity.shared.level = 0 }
+            }
+        }
+    }
     private var activeEngine: Engine = .gemini
     private var pressedAt = Date()
     private var targetApp: String?
+    private var targetBundleID: String?
+    /// ข้อความที่ผู้ใช้ไฮไลต์ไว้ตอนเริ่มพูด — มีแล้วคำพูดอาจเป็น “คำสั่งแก้ข้อความนี้”
+    private var selectedText: String?
+    private var recordStart = Date()
+    private var recordEnd = Date()
     private var lastPCM: Data?
-    private var axWasGranted = false
     private var axTimer: Timer?
 
-    /// แตะสั้นกว่านี้ = เข้าโหมดพูดยาว
-    private let tapThreshold: TimeInterval = 0.35
+    /// กดสั้นกว่านี้ = “แตะ” (โหมดทั้งสองแบบ: เข้าโหมดพูดยาว · โหมดกดค้าง: ถือว่ากดพลาด)
+    private let tapThreshold: TimeInterval = 0.3
 
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installEditMenu()
+        Stats.seedFromHistoryIfNeeded()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
@@ -34,7 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         updateStatusIcon()
 
-        hotkeys.hotkey = settings.hotkey
+        hotkeys.shortcut = settings.shortcut
         hotkeys.onPress = { [weak self] in self?.hotkeyPressed() }
         hotkeys.onRelease = { [weak self] in self?.hotkeyReleased() }
         hotkeys.onOtherKey = { [weak self] in self?.otherKeyDuringHold() }
@@ -43,30 +60,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NotificationCenter.default.addObserver(forName: Settings.changed, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             if !self.settings.enabled { self.cancelRecording() }
+            if self.hotkeys.shortcut != self.settings.shortcut { self.hotkeys.shortcut = self.settings.shortcut }
             self.updateStatusIcon()
         }
 
         speech.onPartial = { [weak self] text in self?.hud.model.text = text }
-        speech.onLevel = { [weak self] level in self?.hud.model.level = CGFloat(level) }
-        live.onLevel = { [weak self] level in self?.hud.model.level = CGFloat(level) }
+        speech.onLevel = { [weak self] level in
+            self?.hud.model.level = CGFloat(level)
+            VoiceActivity.shared.level = CGFloat(level)
+        }
+        live.onLevel = { [weak self] level in
+            self?.hud.model.level = CGFloat(level)
+            VoiceActivity.shared.level = CGFloat(level)
+        }
         live.onPartial = { [weak self] text in self?.hud.model.text = text }
 
         // ถ้าเพิ่งได้สิทธิ์ Accessibility ต้องติดตั้งตัวฟังปุ่มใหม่
-        axWasGranted = Permissions.accessibilityGranted
-        axTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let now = Permissions.accessibilityGranted
-            if now && !self.axWasGranted { self.hotkeys.start() }
-            self.axWasGranted = now
-        }
+        startAccessibilityPolling()
 
-        if !Permissions.allGranted {
+        if !Permissions.allGranted && !CommandLine.arguments.contains("--no-window") {
             onboarding.show()
+        }
+        // สำหรับวัดผล: เปิดหน้าตั้งค่าแล้วปิดเอง เพื่อดูว่าปิดแล้วไม่เหลืออะไรวิ่งค้าง
+        if CommandLine.arguments.contains("--open-close-test") {
+            onboarding.show()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.onboarding.close() }
         }
     }
 
     /// ดับเบิลคลิกแอปซ้ำ (เช่นตอนไอคอนบนแถบเมนูถูกรอยบากจอบัง) → เปิดหน้าตั้งค่า
+    /// รอจนได้สิทธิ์ Accessibility แล้วติดตั้งตัวฟังปุ่มใหม่ — ได้แล้วก็หยุดเช็ก (ไม่วนตลอดไป)
+    private func startAccessibilityPolling() {
+        axTimer?.invalidate()
+        axTimer = nil
+        guard !Permissions.accessibilityGranted else { return }
+        axTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] t in
+            guard let self, Permissions.accessibilityGranted else { return }
+            self.hotkeys.start()
+            t.invalidate()
+            self.axTimer = nil
+        }
+        axTimer?.tolerance = 0.5
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        startAccessibilityPolling()
         onboarding.show()
         return true
     }
@@ -96,12 +134,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Hotkey state machine
 
     private func hotkeyPressed() {
-        guard settings.enabled else { return }
-        switch state {
-        case .idle:
+        guard settings.enabled, !HotkeyCapture.active else { return }
+        switch (settings.triggerMode, state) {
+        case (.hold, .idle), (.both, .idle):
             pressedAt = Date()
             startRecording(handsFree: false)
-        case .handsFree:
+        case (.toggle, .idle):
+            startRecording(handsFree: true)
+        case (_, .handsFree):
             finishRecording()
         default:
             break
@@ -109,11 +149,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func hotkeyReleased() {
-        guard state == .holding else { return }
-        if Date().timeIntervalSince(pressedAt) < tapThreshold {
+        guard settings.triggerMode != .toggle, state == .holding else { return }
+        let tapped = Date().timeIntervalSince(pressedAt) < tapThreshold
+        switch (settings.triggerMode, tapped) {
+        case (.both, true):
+            // แตะทีเดียว = พูดยาวต่อได้เลย ไม่ต้องค้าง (แตะอีกทีเพื่อจบ)
             state = .handsFree
             hud.model.phase = .handsFree
-        } else {
+        case (.hold, true):
+            cancelRecording()
+            hud.flash("กด \(settings.shortcut.short) ค้างไว้ แล้วพูดเลย")
+        default:
             finishRecording()
         }
     }
@@ -143,7 +189,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             switch engine {
             case .apple: try speech.start(language: settings.language)
             case .gemini:
-                live.vocabulary = settings.vocabulary
+                // คำเฉพาะ + คำย่อ ช่วยให้ถอดคำเหล่านี้ได้ตรง
+                live.vocabulary = settings.vocabulary + Snippets.all.map(\.trigger).filter { !$0.isEmpty }
+                live.languages = SpokenLanguage.selected
                 try live.start(apiKey: settings.geminiKey ?? "")
             }
         } catch {
@@ -151,9 +199,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         activeEngine = engine
-        targetApp = NSWorkspace.shared.frontmostApplication?.localizedName
+        let front = NSWorkspace.shared.frontmostApplication
+        targetApp = front?.localizedName
+        targetBundleID = front?.bundleIdentifier
+        // ไฮไลต์ข้อความไว้ = พูดสั่งแก้ได้ (ต้องมี Gemini key เพราะใช้ AI)
+        selectedText = (engine == .gemini && Permissions.accessibilityGranted && front?.bundleIdentifier != Bundle.main.bundleIdentifier)
+            ? Selection.current() : nil
+        recordStart = Date()
         state = handsFree ? .handsFree : .holding
-        hud.model.hotkeyShort = settings.hotkey.short
+        hud.model.editing = selectedText != nil
+        hud.model.hotkeyShort = settings.shortcut.short
         hud.model.text = ""
         hud.model.showText = settings.showLiveText
         hud.model.level = 0
@@ -164,6 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func finishRecording() {
         guard state == .holding || state == .handsFree else { return }
+        recordEnd = Date()
         state = .finishing
         hud.model.phase = .processing
         hud.model.level = 0
@@ -202,10 +258,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// ถ้าพูดคำสั่ง (แปล / ทำเป็นข้อ) ค่อยส่งตัวหนังสือไปทำตามคำสั่งอีกรอบ ไม่งั้นพิมพ์เลย
     private func refineIfNeeded(_ live: LiveResult) {
         let (text, refine) = GeminiClient.decide(live, vocabulary: settings.vocabulary)
-        guard refine, let key = settings.geminiKey else { deliver(text); return }
+        let tone = AppTones.tone(for: targetBundleID)
+        let selection = selectedText
+        // ส่งให้ AI เฉพาะตอนจำเป็น: มีคำสั่งเสียง / แอปนี้ตั้งโทนไว้ / มีข้อความที่เลือกไว้
+        guard refine || tone != .asSpoken || selection != nil, let key = settings.geminiKey else { deliver(text); return }
         hud.model.phase = .processing
         let started = Date()
-        GeminiClient.refineFast(live, apiKey: key, model: settings.geminiModel, targetApp: targetApp) { [weak self] result in
+        GeminiClient.refineFast(live, tone: tone, selection: selection, apiKey: key, model: settings.geminiModel,
+                                targetApp: targetApp) { [weak self] result in
             Log.write(String(format: "refine total %.2fs", Date().timeIntervalSince(started)))
             switch result {
             case .success(let refined): self?.deliver(refined.isEmpty ? text : refined)
@@ -232,13 +292,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func deliver(_ text: String) {
+    private func deliver(_ raw: String) {
         state = .idle
-        if text.isEmpty {
+        selectedText = nil
+        hud.model.editing = false
+        if raw.isEmpty {
             hud.flash("ไม่ได้ยินเสียงพูด ลองใหม่อีกที")
             return
         }
+        let text = ThaiText.fixMaiYamok(Snippets.apply(raw)) // คำย่อของฉัน + เว้นวรรคไม้ยมกให้ถูก
         History.add(text, app: targetApp)
+        Stats.record(text, speakingSeconds: recordEnd.timeIntervalSince(recordStart))
         if Permissions.accessibilityGranted {
             TextInserter.insert(text, keepInClipboard: settings.keepInClipboard)
             hud.hide(after: 0.15)
@@ -258,6 +322,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .gemini: live.cancel()
         }
         state = .idle
+        selectedText = nil
+        hud.model.editing = false
         hud.hide()
     }
 
@@ -270,23 +336,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
-        let recording = state != .idle
-        let name = !settings.enabled ? "mic.slash.circle" : recording ? "waveform.circle.fill" : "waveform.circle"
-        var image = NSImage(systemSymbolName: name, accessibilityDescription: "พูดดิวะ")
-        if recording {
-            let config = NSImage.SymbolConfiguration(paletteColors: [.white, Brand.orange])
-            image = image?.withSymbolConfiguration(config)
-            image?.isTemplate = false
-        } else {
-            image?.isTemplate = true
-        }
-        button.image = image
+        let mode: StatusIcon.Mode = !settings.enabled ? .off : state != .idle ? .recording : .idle
+        let image = StatusIcon.image(mode)
+        if button.image !== image { button.image = image } // วาดใหม่เฉพาะตอนสถานะเปลี่ยน
     }
+
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let power = NSMenuItem(title: settings.enabled ? "เปิดรับเสียงอยู่ — กด \(settings.hotkey.short) ค้างแล้วพูด" : "ปิดรับเสียงอยู่",
+        let power = NSMenuItem(title: settings.enabled ? "เปิดรับเสียงอยู่ — กด \(settings.shortcut.short) แล้วพูด" : "ปิดรับเสียงอยู่",
                                action: #selector(togglePower), keyEquivalent: "")
         power.target = self
         power.state = settings.enabled ? .on : .off
@@ -347,9 +406,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                                  action: #selector(selectLanguage(_:))))
         }
 
-        menu.addItem(submenu(title: "ปุ่มลัด: \(settings.hotkey.title)",
-                             items: Hotkey.allCases.map { ($0.title, $0.rawValue, $0 == settings.hotkey) },
-                             action: #selector(selectHotkey(_:))))
+        let keyItem = NSMenuItem(title: "ปุ่มลัด: \(settings.shortcut.title) — เปลี่ยน…", action: #selector(showOnboarding), keyEquivalent: "")
+        keyItem.target = self
+        menu.addItem(keyItem)
 
         let sound = NSMenuItem(title: "เสียงแจ้งเตือน", action: #selector(toggleSounds), keyEquivalent: "")
         sound.target = self
@@ -426,19 +485,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let lang = Language(rawValue: raw) {
             settings.language = lang
-        }
-    }
-
-    @objc private func selectHotkey(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let hk = Hotkey(rawValue: raw) else { return }
-        settings.hotkey = hk
-        hotkeys.hotkey = hk
-        if hk == .fn {
-            let alert = NSAlert()
-            alert.messageText = "ใช้ปุ่ม fn (ปุ่มลูกโลก)"
-            alert.informativeText = "ไปที่ System Settings → Keyboard แล้วตั้ง “Press fn key to” เป็น “Do Nothing” ก่อน ไม่งั้นจะมีหน้าต่างอีโมจิหรือ Dictation ของ Apple เด้งขึ้นมาด้วย"
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
         }
     }
 
