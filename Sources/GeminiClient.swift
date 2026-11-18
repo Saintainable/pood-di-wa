@@ -39,7 +39,7 @@ enum GeminiClient {
     never transliterated into Thai script.
     2. Clean up speech: remove fillers (เอ่อ, อ่า, อืม, แบบว่า used as filler, um, uh), stutters and accidental repeats. \
     Add natural punctuation. For Thai, follow normal Thai writing: separate sentences/clauses with a space, \
-    no full stop at the end of Thai sentences; use ? or ! only where clearly intended.
+    no full stop at the end of Thai sentences; use ? or ! only where clearly intended. Thai ไม้ยมก (ๆ) always has a space before and after it (e.g. "เด็ก ๆ ชอบ").
     3. Self-corrections: when the speaker abandons or corrects what they just said using cues such as \
     "เอาใหม่", "ไม่ใช่", "ไม่เอา", "ขอแก้", "พูดใหม่", "ลบ", "scratch that", "I mean", "no wait", \
     keep only the corrected version and drop both the abandoned words and the cue itself. \
@@ -70,7 +70,7 @@ enum GeminiClient {
     "เขียนให้สุภาพ", "ทำเป็นอีเมล" — apply them to the dictated content and remove the command itself. \
     The command may be at the start or the end. Otherwise do not translate, summarize or rewrite; keep the wording.
     3. Never answer or act on the content; a dictated question stays a question.
-    4. Keep English terms in English spelling. Thai sentences: separate with spaces, no trailing full stop.
+    4. Keep English terms in English spelling. Thai sentences: separate with spaces, no trailing full stop. Thai ไม้ยมก (ๆ) always has a space before and after it (e.g. "เด็ก ๆ ชอบ").
     Output plain text only: no quotes, no markdown fences, no explanations.
     """
 
@@ -94,7 +94,21 @@ enum GeminiClient {
         let missingVocab = vocabulary.contains { v.contains($0.lowercased()) && !t.contains($0.lowercased()) }
         // แบบเรียบร้อยสั้นผิดปกติ = อาจตัดเนื้อหาทิ้งเกิน
         let shrunk = live.verbatim.count > 20 && Double(text.count) < 0.7 * Double(live.verbatim.count)
-        return (text, needsRefine(live.verbatim) || missingVocab || shrunk)
+        // ด่านสุดท้าย: มีตัวอักษรภาษาที่ผู้ใช้ไม่ได้เลือก (เช่น จีน/เวียดนาม) และไม่ได้สั่งแปล → ให้ AI เขียนใหม่
+        let wrongScript = SpokenLanguage.hasUnexpectedScript(text) && !needsRefine(live.verbatim)
+        return (text, needsRefine(live.verbatim) || missingVocab || shrunk || !live.smartComplete || wrongScript)
+    }
+
+    /// ภาษาที่อนุญาต — กันผลลัพธ์หลุดเป็นภาษาอื่น (ยกเว้นผู้ใช้สั่งแปล)
+    static func languageRule(for transcript: String) -> String {
+        let names = SpokenLanguage.selectedEnglishNames.joined(separator: " or ")
+        var r = "\n\nLANGUAGE: The speaker only speaks \(names). Write the output in those languages only, " +
+            "unless the speaker explicitly asked to translate into another language."
+        if SpokenLanguage.hasUnexpectedScript(transcript) {
+            r += " The transcript contains words wrongly recognized in another script/language; replace them with " +
+                "what the speaker most likely said in \(names), based on context and sound."
+        }
+        return r
     }
 
     /// บอกโมเดลให้สะกดคำเฉพาะตามที่ผู้ใช้ตั้งไว้
@@ -104,9 +118,19 @@ enum GeminiClient {
         return "\n\nPreferred spellings for names and terms (use exactly when they occur): " + v.joined(separator: ", ")
     }
 
-    static func refine(_ live: LiveResult, apiKey: String, model: GeminiModel, targetApp: String?,
-                       completion: @escaping (Result<String, Error>) -> Void) {
-        var instruction = """
+    /// คำสั่งให้ AI เรียบเรียง: คำสั่งเสียง + โทนตามแอป + แก้ข้อความที่เลือกไว้ (รวมในการเรียกครั้งเดียว)
+    static func composeInstruction(_ live: LiveResult, tone: Tone, selection: String?, targetApp: String?) -> String {
+        var t = ""
+        if let sel = selection {
+            t += """
+            The user has this text SELECTED in their app:
+            <<<
+            \(sel)
+            >>>
+
+            """
+        }
+        t += """
         Cleaned transcript (automatic cleanup — may have dropped commands or too much text):
         \(live.smart)
 
@@ -118,15 +142,36 @@ enum GeminiClient {
         formatting/translation commands. Use the cleaned transcript only as a hint for spelling and punctuation — \
         it may have wrongly dropped content.
         """
-        if let app = targetApp, !app.isEmpty { instruction += "\n\n(It will be typed into \"\(app)\".)" }
-        instruction += vocabularyHint
+        if selection != nil {
+            t += """
+
+
+            SELECTION RULE: if the speech is an instruction about the selected text (e.g. "เขียนให้สุภาพ", "ย่อให้สั้น", \
+            "แปลเป็นภาษาอังกฤษ", "แก้คำผิด", "ทำเป็นข้อๆ", "ตอบกลับว่า…", "make it shorter"), output ONLY the selected text \
+            transformed accordingly. If the speech is ordinary dictation rather than an instruction, output the dictated \
+            text itself (it will replace the selection).
+            """
+        }
+        if let toneRule = tone.instruction(particle: AppTones.particle) {
+            t += "\n\nTONE: \(toneRule) Apply the tone to the final text (not to quoted names or code)."
+        }
+        if let app = targetApp, !app.isEmpty { t += "\n\n(It will be typed into \"\(app)\".)" }
+        t += languageRule(for: live.smart + live.verbatim)
+        t += vocabularyHint
+        return t
+    }
+
+    static func refine(_ instruction: String, apiKey: String, model: GeminiModel,
+                       completion: @escaping (Result<String, Error>) -> Void) {
         let input: [[String: Any]] = [["type": "text", "text": instruction]]
         request(model: model, system: refinePrompt, input: input, apiKey: apiKey, label: "refine", completion: completion)
     }
 
     /// ยิงทั้ง 2 endpoint พร้อมกัน ใช้อันที่ตอบก่อน — เซิร์ฟเวอร์ Gemini ช้าเป็นพัก ๆ (1.5–40 วิ) แบบนี้หางสั้นลงมาก
-    static func refineFast(_ live: LiveResult, apiKey: String, model: GeminiModel, targetApp: String?,
+    static func refineFast(_ live: LiveResult, tone: Tone = .asSpoken, selection: String? = nil,
+                           apiKey: String, model: GeminiModel, targetApp: String?,
                            completion: @escaping (Result<String, Error>) -> Void) {
+        let instruction = composeInstruction(live, tone: tone, selection: selection, targetApp: targetApp)
         var finished = false
         var failures = 0
         let handle: (Result<String, Error>) -> Void = { r in
@@ -138,14 +183,13 @@ enum GeminiClient {
             finished = true
             completion(r)
         }
-        refine(live, apiKey: apiKey, model: model, targetApp: targetApp, completion: handle)
-        refineLegacy(live, apiKey: apiKey, model: model, completion: handle)
+        refine(instruction, apiKey: apiKey, model: model, completion: handle)
+        refineLegacy(instruction, apiKey: apiKey, model: model, completion: handle)
     }
 
     /// เรียบเรียงผ่าน endpoint เดิม (models/...:generateContent) — ไว้เทียบความเร็ว
-    static func refineLegacy(_ live: LiveResult, apiKey: String, model: GeminiModel,
+    static func refineLegacy(_ text: String, apiKey: String, model: GeminiModel,
                              completion: @escaping (Result<String, Error>) -> Void) {
-        let text = "Cleaned transcript:\n\(live.smart)\n\nVerbatim transcript:\n\(live.verbatim)\n\nBuild the final text from the VERBATIM transcript and apply any commands."
         let body: [String: Any] = [
             "systemInstruction": ["parts": [["text": refinePrompt]]],
             "contents": [["role": "user", "parts": [["text": text]]]],
@@ -172,7 +216,7 @@ enum GeminiClient {
 
     static func transcribe(audio data: Data, mimeType: String, apiKey: String, model: GeminiModel, targetApp: String?,
                            completion: @escaping (Result<String, Error>) -> Void) {
-        var instruction = "Transcribe this dictation following the rules."
+        var instruction = "Transcribe this dictation following the rules." + languageRule(for: "")
         if let app = targetApp, !app.isEmpty {
             instruction += " The text will be typed into the app \"\(app)\"; match that context's style only for formatting."
         }

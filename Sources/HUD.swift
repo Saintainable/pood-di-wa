@@ -15,6 +15,10 @@ final class HUDModel: ObservableObject {
     /// ข้อความสดระหว่างพูด — แสดงเฉพาะตอนเปิดตัวเลือก “โชว์คำที่พูด”
     @Published var text: String = ""
     @Published var showText = false
+    /// แถบแสดงอยู่ไหม — ซ่อนแล้วหยุดแอนิเมชันทั้งหมด (ไม่กิน CPU ตอนอยู่เบื้องหลัง)
+    @Published var visible = false
+    /// กำลังพูดสั่งแก้ข้อความที่ไฮไลต์ไว้
+    @Published var editing = false
     var hotkeyShort: String = "⌥ ขวา"
 }
 
@@ -50,7 +54,7 @@ struct HUDView: View {
         default:
             HStack(spacing: 8) {
                 indicator
-                TimelineView(.animation) { tl in
+                TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !model.visible)) { tl in
                     wave(t: tl.date.timeIntervalSinceReferenceDate)
                 }
                 .frame(width: 66, height: 20)
@@ -78,8 +82,14 @@ struct HUDView: View {
                 .frame(width: 10)
         case .processing:
             Circle().fill(Color.white.opacity(0.35)).frame(width: 7, height: 7).frame(width: 10)
+        case _ where model.editing:
+            Image(systemName: "pencil")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(Color(nsColor: Brand.orange))
+                .frame(width: 12)
+                .help("พูดสั่งแก้ข้อความที่เลือกไว้")
         default:
-            TimelineView(.animation) { tl in
+            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !model.visible)) { tl in
                 let pulse = 0.55 + 0.45 * abs(sin(tl.date.timeIntervalSinceReferenceDate * 3))
                 Circle().fill(Color(nsColor: Brand.red)).frame(width: 7, height: 7).opacity(pulse)
             }
@@ -141,6 +151,7 @@ final class HUDController {
     }
 
     func show() {
+        model.visible = true
         hideWork?.cancel()
         let p = panel ?? makePanel()
         panel = p
@@ -169,6 +180,7 @@ final class HUDController {
             }, completionHandler: {
                 p.orderOut(nil)
                 self?.model.level = 0
+                self?.model.visible = false
             })
         }
         hideWork = work

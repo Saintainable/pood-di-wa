@@ -41,13 +41,25 @@ enum Brand {
 
 /// ปุ่มที่ใช้กดค้างเพื่อพูด
 enum Hotkey: String, CaseIterable {
-    case rightOption, rightCommand, rightControl, fn
+    case rightOption, rightCommand, rightControl, rightShift
+    case leftOption, leftCommand, leftControl, leftShift
+    case fn
+
+    static let `default` = Hotkey.rightOption
+
+    /// ปุ่มนี้ใช้คู่กับคีย์ลัดอื่นบ่อย (กดคู่ปุ่มอื่นแล้วจะยกเลิกการอัดเอง)
+    var isCommonlyUsed: Bool { [.leftOption, .leftCommand, .leftControl, .leftShift, .rightShift].contains(self) }
 
     var keyCode: UInt16 {
         switch self {
         case .rightOption: 61
         case .rightCommand: 54
         case .rightControl: 62
+        case .rightShift: 60
+        case .leftOption: 58
+        case .leftCommand: 55
+        case .leftControl: 59
+        case .leftShift: 56
         case .fn: 63
         }
     }
@@ -58,27 +70,54 @@ enum Hotkey: String, CaseIterable {
         case .rightOption: 0x40
         case .rightCommand: 0x10
         case .rightControl: 0x2000
+        case .rightShift: 0x04
+        case .leftOption: 0x20
+        case .leftCommand: 0x08
+        case .leftControl: 0x01
+        case .leftShift: 0x02
         case .fn: NSEvent.ModifierFlags.function.rawValue
         }
     }
 
-    var title: String {
-        switch self {
-        case .rightOption: "⌥ Option ขวา"
-        case .rightCommand: "⌘ Command ขวา"
-        case .rightControl: "⌃ Control ขวา"
-        case .fn: "fn (ปุ่มลูกโลก)"
-        }
+    static func from(keyCode: UInt16) -> Hotkey? {
+        allCases.first { $0.keyCode == keyCode }
     }
 
-    var short: String {
+    private var symbol: String {
         switch self {
-        case .rightOption: "⌥ ขวา"
-        case .rightCommand: "⌘ ขวา"
-        case .rightControl: "⌃ ขวา"
+        case .rightOption, .leftOption: "⌥"
+        case .rightCommand, .leftCommand: "⌘"
+        case .rightControl, .leftControl: "⌃"
+        case .rightShift, .leftShift: "⇧"
         case .fn: "fn"
         }
     }
+
+    private var name: String {
+        switch self {
+        case .rightOption, .leftOption: "Option"
+        case .rightCommand, .leftCommand: "Command"
+        case .rightControl, .leftControl: "Control"
+        case .rightShift, .leftShift: "Shift"
+        case .fn: ""
+        }
+    }
+
+    private var side: String {
+        switch self {
+        case .rightOption, .rightCommand, .rightControl, .rightShift: "ขวา"
+        case .leftOption, .leftCommand, .leftControl, .leftShift: "ซ้าย"
+        case .fn: ""
+        }
+    }
+
+    var title: String { self == .fn ? "fn (ปุ่มลูกโลก)" : "\(symbol) \(name) \(side)" }
+    var short: String { self == .fn ? "fn" : "\(symbol) \(side)" }
+}
+
+/// ระหว่างผู้ใช้กำลังตั้งปุ่มลัดใหม่ ห้ามเริ่มอัดเสียง
+enum HotkeyCapture {
+    static var active = false
 }
 
 enum Language: String, CaseIterable {
@@ -134,12 +173,52 @@ final class Settings {
         }
     }
 
-    var hasGeminiKey: Bool { !(geminiKey ?? "").isEmpty }
-
-    var hotkey: Hotkey {
-        get { Hotkey(rawValue: d.string(forKey: "hotkey") ?? "") ?? .rightOption }
-        set { d.set(newValue.rawValue, forKey: "hotkey") }
+    var hasGeminiKey: Bool {
+        if CommandLine.arguments.contains("--pretend-no-key") { return false } // สำหรับถ่ายภาพหน้าจอ
+        return !(geminiKey ?? "").isEmpty
     }
+
+    /// ปุ่มลัด (ปุ่มเดียวหรือปุ่มผสม) — ย้ายค่ามาจากแบบเก่า “hotkey” อัตโนมัติ
+    var shortcut: Shortcut {
+        get {
+            if let data = d.data(forKey: "shortcut"), let sc = try? JSONDecoder().decode(Shortcut.self, from: data) { return sc }
+            if let old = Hotkey(rawValue: d.string(forKey: "hotkey") ?? "") { return .modifier(old) }
+            return .default
+        }
+        set {
+            d.set(try? JSONEncoder().encode(newValue), forKey: "shortcut")
+            NotificationCenter.default.post(name: Settings.changed, object: nil)
+        }
+    }
+
+    /// วิธีกด 2 สวิตช์: กดค้างแล้วพูด / แตะเพื่อพูดยาว (เปิดทั้งคู่ได้ ต้องเปิดอย่างน้อย 1)
+    var holdEnabled: Bool {
+        get { d.object(forKey: "modeHold") as? Bool ?? true }
+        set {
+            d.set(newValue, forKey: "modeHold")
+            if !newValue && !tapEnabled { d.set(true, forKey: "modeTap") }
+            NotificationCenter.default.post(name: Settings.changed, object: nil)
+        }
+    }
+
+    var tapEnabled: Bool {
+        get { d.object(forKey: "modeTap") as? Bool ?? true }
+        set {
+            d.set(newValue, forKey: "modeTap")
+            if !newValue && !holdEnabled { d.set(true, forKey: "modeHold") }
+            NotificationCenter.default.post(name: Settings.changed, object: nil)
+        }
+    }
+
+    /// รวม 2 สวิตช์เป็นโหมดเดียวให้ตัวจัดการปุ่มใช้
+    var triggerMode: TriggerMode {
+        switch (holdEnabled, tapEnabled) {
+        case (true, true): return .both
+        case (true, false): return .hold
+        default: return .toggle
+        }
+    }
+
 
     var language: Language {
         get { Language(rawValue: d.string(forKey: "language") ?? "") ?? .thai }

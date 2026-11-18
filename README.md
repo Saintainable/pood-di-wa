@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><b>ดาวน์โหลด DMG</b></a> · macOS 13+ · Apple Silicon &amp; Intel · MIT
+  <a href="../../releases/latest"><b>ดาวน์โหลด DMG</b></a> · macOS 13+ · Apple Silicon &amp; Intel · ใช้ฟรี (ห้ามนำไปขาย)
 </p>
 
 <p align="center"><img src="docs/screenshot.png" width="720" alt="Pood Di Wa settings window"></p>
@@ -92,9 +92,11 @@ APP="/Applications/Pood Di Wa.app/Contents/MacOS/PoodDiWa"
 | `Sources/GeminiClient.swift` | prompt, ขั้นเรียบเรียง, ส่งแบบไฟล์ (fallback) |
 | `Sources/HotkeyMonitor.swift` | ฟังปุ่ม modifier ทั้งระบบ |
 | `Sources/TextInserter.swift` | วางข้อความลงแอปที่โฟกัสอยู่ |
-| `Sources/Onboarding.swift`, `Mascot.swift`, `HUD.swift` | หน้าตั้งค่า, มาสคอต, แถบตอนพูด |
+| `Sources/MainWindow.swift`, `HistoryPage.swift`, `SettingsPage.swift`, `SetupWizard.swift` | หน้าต่างหลัก (หน้าแรก/ประวัติ/ตั้งค่า) และขั้นตอนตั้งค่าครั้งแรก |
+| `Sources/Mascot.swift`, `HUD.swift` | มาสคอต, แถบตอนพูด |
 
 ## License
 
-- โค้ด: [MIT](LICENSE)
+- โค้ด: [PolyForm Noncommercial 1.0.0](LICENSE) — ใช้ฟรี แก้ไขได้ แจกต่อได้ **แต่ห้ามนำไปใช้เชิงพาณิชย์หรือขาย**
+  (เวอร์ชัน 1.0.0 ที่ปล่อยไปก่อนหน้านี้ยังอยู่ภายใต้ MIT ตามเดิม)
 - ฟอนต์ [Anuphan](https://github.com/cadsondemak/Anuphan) โดย Cadson Demak: [SIL Open Font License 1.1](Resources/Fonts/OFL.txt)
